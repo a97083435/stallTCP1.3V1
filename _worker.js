@@ -1,17 +1,16 @@
 import { connect } from 'cloudflare:sockets';
 
 // =============================================================================
-// 🟣 用户配置区域 (优先读取环境变量，如果未设置则使用以下默认值)
+// 🟣 用户配置区域 (优先读取环境变量)
 // =============================================================================
 const UUID = "06b65903-406d-4a41-8463-6fd5c0ee7798"; 
 
-// 1. 后台管理密码 (必填！否则直接进后台，不显示登录页)
+// 1. 后台管理密码
 const WEB_PASSWORD = ""; 
 // 2. 快速订阅密码
 const SUB_PASSWORD = ""; 
 
-// 3. 默认基础配置
-// 🟢 已同步你提供的 snippets 文件中的默认 IP
+// 3. 默认配置
 const DEFAULT_PROXY_IP = "ProxyIP.Oracle.cmliussss.net"; 
 const DEFAULT_SUB_DOMAIN = "sub.cmliussss.net"; 
 
@@ -27,7 +26,7 @@ const CLASH_CONFIG = "https://raw.githubusercontent.com/cmliu/ACL4SSR/main/Clash
 const SINGBOX_CONFIG_V12 = "https://raw.githubusercontent.com/sinspired/sub-store-template/main/1.12.x/sing-box.json"; 
 const SINGBOX_CONFIG_V11 = "https://raw.githubusercontent.com/sinspired/sub-store-template/main/1.11.x/sing-box.json"; 
 
-// TG配置
+// TG配置 (默认值)
 const TG_BOT_TOKEN = ""; 
 const TG_CHAT_ID = ""; 
 
@@ -51,13 +50,30 @@ const DEFAULT_CUSTOM_IPS = `173.245.58.127#CF官方优选
 // =============================================================================
 // ⚡️ 核心逻辑区
 // =============================================================================
-// 🟢 引入文件2的运行时白名单机制，用于区分管理员通知
 const RUNTIME_WHITELIST = new Set();
-const IP_HISTORY = new Map(); // 用于简易记录访问次数
+const IP_HISTORY = new Map(); 
 
 const MAX_PENDING=2097152,KEEPALIVE=15000,STALL_TO=8000,MAX_STALL=12,MAX_RECONN=24;
 const buildUUID=(a,i)=>[...a.slice(i,i+16)].map(n=>n.toString(16).padStart(2,'0')).join('').replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/,'$1-$2-$3-$4-$5');
-const extractAddr=b=>{const o=18+b[17]+1,p=(b[o]<<8)|b[o+1],t=b[o+2];let l,h,O=o+3;switch(t){case 1:l=4;h=b.slice(O,O+l).join('.');break;case 2:l=b[O++];h=new TextDecoder().decode(b.slice(O,O+l));break;case 3:l=16;h=`[${[...Array(8)].map((_,i)=>((b[O+i*2]<<8)|b[O+i*2+1]).toString(16)).join(':')}]`;break;default:throw new Error('Addr type error');}return{host:h,port:p,payload:b.slice(O+l)}};
+const extractAddr=b=>{
+    // [FIX] 增加安全检查，防止非法包导致越界
+    if(b.length < 18) throw new Error('Data too short');
+    const length = b[17];
+    if(length === undefined || b.length < 18 + length + 1) throw new Error('Data format error');
+    
+    const o=18+length+1;
+    const p=(b[o]<<8)|b[o+1];
+    const t=b[o+2];
+    let l,h,O=o+3;
+    
+    switch(t){
+        case 1:l=4;h=b.slice(O,O+l).join('.');break;
+        case 2:l=b[O++];h=new TextDecoder().decode(b.slice(O,O+l));break;
+        case 3:l=16;h=`[${[...Array(8)].map((_,i)=>((b[O+i*2]<<8)|b[O+i*2+1]).toString(16)).join(':')}]`;break;
+        default:throw new Error('Addr type error');
+    }
+    return{host:h,port:p,payload:b.slice(O+l)}
+};
 
 async function resolveNetlib(n){try{const r=await fetch(`https://1.1.1.1/dns-query?name=${n}&type=TXT`,{headers:{'Accept':'application/dns-json'}});if(!r.ok)return null;const d=await r.json(),t=(d.Answer||[]).filter(x=>x.type===16).map(x=>x.data);if(!t.length)return null;let D=t[0].replace(/^"|"$/g,'');const p=D.replace(/\\010|\n/g,',').split(',').map(s=>s.trim()).filter(Boolean);return p.length?p[Math.floor(Math.random()*p.length)]:null}catch{return null}}
 async function parseIP(p){p=p.toLowerCase();if(p.includes('.netlib')){const n=await resolveNetlib(p);p=n||p}let a=p,o=443;if(p.includes('.tp')){const m=p.match(/\.tp(\d+)/);if(m)o=parseInt(m[1],10);return[a,o]}if(p.includes(']:')){const s=p.split(']:');a=s[0]+']';o=parseInt(s[1],10)||o}else if(p.includes(':')&&!p.startsWith('[')){const i=p.lastIndexOf(':');a=p.slice(0,i);o=parseInt(p.slice(i+1),10)||o}return[a,o]}
@@ -80,7 +96,6 @@ function genNodes(h,u,p){
     }).join('\n');
 }
 
-// 🟢 移植功能：文件2的增强版 TG 通知发送函数
 async function sendTgMsg(token, chat_id, ctx, title, r, detail = "") {
   if (!token || !chat_id) return;
   try {
@@ -115,45 +130,72 @@ export default {
       const host = url.hostname; 
       const UA = (r.headers.get('User-Agent') || "").toLowerCase();
       const ip = r.headers.get('cf-connecting-ip') || 'Unknown';
-      const isWhite = RUNTIME_WHITELIST.has(ip); // 简单的白名单判断
+      const isWhite = RUNTIME_WHITELIST.has(ip); 
 
       if (url.pathname === '/favicon.ico') return new Response(null, { status: 404 });
 
-      // 🟢 移植功能：Flag 处理逻辑 (GitHub 跳转 + CheckProxy 通知)
-      if (url.searchParams.get('flag')) {
-          const flag = url.searchParams.get('flag');
+      // 🔄 功能接口
+      const flag = url.searchParams.get('flag');
+      if (flag) {
           if (flag === 'github') {
               await sendTgMsg(MY_TG_TOKEN, MY_TG_ID, ctx, "🌟 用户点击了烈火项目", r, "来源: 登录页面直达链接");
+              return new Response(null, { status: 204 });
           } else if (flag === 'checkproxy') {
               const checkIp = url.searchParams.get('ip') || "未填写";
               const title = isWhite ? "🔍 管理员点击了检测站" : "🔍 用户点击了检测站";
               await sendTgMsg(MY_TG_TOKEN, MY_TG_ID, ctx, title, r, `检测IP: ${checkIp}`);
+              return new Response(null, { status: 204 });
+          } else if (flag === 'test_tg') {
+              const token = url.searchParams.get('token');
+              const id = url.searchParams.get('id');
+              if(token && id) {
+                  await sendTgMsg(token, id, ctx, "✅ 通知测试成功", r, "您的 Telegram Bot 配置正确");
+                  return new Response(JSON.stringify({ok: true}), { status: 200 });
+              }
+              return new Response(JSON.stringify({ok: false}), { status: 400 });
+          } else if (flag === 'get_cf_stats') {
+              const cfEmail = r.headers.get('X-CF-Email');
+              const cfKey = r.headers.get('X-CF-Key');
+              const cfAcc = r.headers.get('X-CF-Acc');
+              if (!cfEmail || !cfKey || !cfAcc) return new Response("Missing Credentials", { status: 400 });
+
+              const now = new Date();
+              const start = new Date(now); start.setDate(start.getDate() - 1); 
+              const query = `query { viewer { accounts(filter: {accountTag: "${cfAcc}"}) { workersInvocationsAdaptive(limit: 10, filter: { datetime_geq: "${start.toISOString()}", datetime_leq: "${now.toISOString()}" }) { sum { requests } } } } }`;
+              const cfReq = await fetch("https://api.cloudflare.com/client/v4/graphql", {
+                  method: "POST", headers: { "Content-Type": "application/json", "X-Auth-Email": cfEmail, "X-Auth-Key": cfKey }, body: JSON.stringify({ query })
+              });
+              return new Response(cfReq.body, { status: cfReq.status, headers: { 'Content-Type': 'application/json' } });
+          } else if (flag === 'net_test') {
+              const target = url.searchParams.get('url');
+              if(!target) return new Response("Missing URL", {status: 400});
+              const start = Date.now();
+              try {
+                  await fetch(target, { method: 'HEAD', redirect: 'follow' });
+                  return new Response(JSON.stringify({ ok: true, ms: Date.now() - start }), { status: 200 });
+              } catch(e) {
+                  return new Response(JSON.stringify({ ok: false, ms: 0 }), { status: 200 });
+              }
           }
-          return new Response(null, { status: 204 });
       }
 
       // 1. 快速订阅接口
       if (MY_SUB_PASSWORD && url.pathname === `/${MY_SUB_PASSWORD}`) {
           const K_CLASH = 'c'+'l'+'a'+'s'+'h';
           const K_SB = 's'+'i'+'n'+'g'+'-'+'b'+'o'+'x';
-          const K_VR = 'v'+'2'+'r'+'a'+'y';
           
           const isClash = UA.includes(K_CLASH) || UA.includes('meta') || UA.includes('stash');
           const isSingbox = UA.includes(K_SB) || UA.includes('singbox') || UA.includes('sfi') || UA.includes('box') || UA.includes('karing') || UA.includes('neko');
-          const isV2ray = UA.includes(K_VR);
           const isConverter = UA.includes("subconverter") || UA.includes("sub-one-proxy");
           const isFlagged = url.searchParams.has('flag');
           const now = Date.now();
 
-          // 🟢 移植功能：文件2的详细订阅通知逻辑
           if (!isFlagged) {
              let clientName = "浏览器/未知";
-             let notifTitle = isWhite ? "🔬 管理员正在进行链接测试并打开访问了订阅链接" : "🌍 用户打开了我的订阅链接并访问";
-
-             if (isSingbox) { clientName = "Sing-box"; notifTitle = "🔄 用户进行了订阅更新"; }
-             else if (isClash) { clientName = "Clash"; notifTitle = "🔄 用户进行了订阅更新"; }
-             else if (isV2ray) { clientName = atob("djJyYXlORw=="); notifTitle = "🔄 用户进行了订阅更新"; }
-             else if (isConverter) { clientName = "订阅转换后端"; notifTitle = "🔄 用户进行了订阅更新"; }
+             let notifTitle = isWhite ? "🔬 管理员测试订阅" : "🌍 用户访问订阅";
+             if (isSingbox) { clientName = "Sing-box"; notifTitle = "🔄 用户订阅更新"; }
+             else if (isClash) { clientName = "Clash"; notifTitle = "🔄 用户订阅更新"; }
+             else if (isConverter) { clientName = "API转换"; notifTitle = "🔄 用户订阅更新"; }
 
              const p = sendTgMsg(MY_TG_TOKEN, MY_TG_ID, ctx, notifTitle, r, `客户端: ${clientName}`);
              if(ctx && ctx.waitUntil) ctx.waitUntil(p);
@@ -173,7 +215,7 @@ export default {
               const converterUrl = `${DEFAULT_CONVERTER}/sub?target=singbox&url=${encodeURIComponent(selfUrl)}&config=${encodeURIComponent(targetConfig)}&emoji=true&list=false&sort=false&fdn=false&scv=false&_t=${now}`;
               const subRes = await fetch(converterUrl);
               const newHeaders = new Headers(subRes.headers);
-              newHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+              newHeaders.set('Cache-Control', 'no-store, no-cache, must-revalidate');
               return new Response(subRes.body, { status: 200, headers: newHeaders });
           }
 
@@ -190,12 +232,10 @@ export default {
 
           let upstream = MY_SUB_DOMAIN.trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
           if (!upstream) upstream = host;
-          
           let reqProxyIp = url.searchParams.get('proxyip');
           if (!reqProxyIp && MY_PROXYIP && MY_PROXYIP.trim() !== "") reqProxyIp = MY_PROXYIP;
           let targetPath = "/";
           if (reqProxyIp && reqProxyIp.trim() !== "") targetPath = `/proxyip=${reqProxyIp.trim()}`;
-
           const params = new URLSearchParams();
           params.append("uuid", MY_UUID);
           params.append("host", upstream);
@@ -207,7 +247,6 @@ export default {
           params.append("alpn", "h3");
           params.append("fp", "random");
           params.append("allowInsecure", "1");
-
           const upstreamUrl = `https://${upstream}/sub?${params.toString()}`;
           try {
               const response = await fetch(upstreamUrl, { headers: { "User-Agent": "Mozilla/5.0" } });
@@ -226,6 +265,7 @@ export default {
           return new Response(btoa(unescape(encodeURIComponent(fallbackList))), { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
       }
 
+      // 2. 常规订阅
       if (url.pathname === '/sub') {
           const requestUUID = url.searchParams.get('uuid');
           if (requestUUID !== MY_UUID) return new Response('Invalid UUID', { status: 403 });
@@ -234,13 +274,12 @@ export default {
           if (pathParam && pathParam.includes('/proxyip=')) proxyIp = pathParam.split('/proxyip=')[1];
           else if (pathParam === null) proxyIp = MY_PROXYIP;
           const listText = genNodes(host, MY_UUID, proxyIp);
-          
           const p = sendTgMsg(MY_TG_TOKEN, MY_TG_ID, ctx, "常规订阅访问 (/sub)", r);
           if(ctx && ctx.waitUntil) ctx.waitUntil(p);
-          
           return new Response(btoa(unescape(encodeURIComponent(listText))), { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' } });
       }
 
+      // 3. 面板逻辑
       if (r.headers.get('Upgrade') !== 'websocket') {
           const noCacheHeaders = {
               'Content-Type': 'text/html; charset=utf-8',
@@ -255,7 +294,6 @@ export default {
               const userAuth = match ? match[1] : null;
 
               if (userAuth !== MY_WEB_PASSWORD) {
-                  // 🟢 移植功能：文件2的登录失败/访问页通知
                   if (userAuth) {
                       await sendTgMsg(MY_TG_TOKEN, MY_TG_ID, ctx, "🚨 后台登录失败", r, `尝试密码: ${userAuth} (错误)`);
                       return new Response(loginPage(true, MY_TG_GROUP, MY_TG_CHANNEL), { status: 200, headers: noCacheHeaders });
@@ -268,7 +306,6 @@ export default {
               }
           }
           
-          // 🟢 移植功能：登录成功后加入运行时白名单
           RUNTIME_WHITELIST.add(ip);
           await sendTgMsg(MY_TG_TOKEN, MY_TG_ID, ctx, "✅ 后台登录成功", r, "进入管理面板");
           return new Response(dashPage(url.hostname, MY_UUID, MY_PROXYIP, MY_SUB_PASSWORD, MY_TG_TOKEN, MY_TG_ID, MY_TG_GROUP), { status: 200, headers: noCacheHeaders });
@@ -317,13 +354,12 @@ const handle = (ws, pc, currentUUID) => {
   const wtL = async () => { if (wt) return; wt = true; try { while (wt) { if (!w) { await new Promise(r => setTimeout(r, 100)); continue } if (!pd.length) { await new Promise(r => setTimeout(r, 20)); continue } const b = pd.shift(); await w.write(b); pb -= b.length; pool.free(b) } } catch { wt = false } };
   const est = async () => { try { s = await cn(); w = s.writable.getWriter(); r = s.readable.getReader(); con = false; cnt = 0; scr = Math.min(1, scr + 0.15); lact = Date.now(); rdL(); wtL() } catch { con = false; scr = Math.max(0.1, scr - 0.2); rcn() } };
   const cn = async () => { const m = ['direct']; if (pc) m.push('proxy'); let err; for (const x of m) { try { const o = (x === 'direct') ? { hostname: inf.host, port: inf.port } : { hostname: pc.address, port: pc.port }; const sk = connect(o); await sk.opened; return sk } catch (e) { err = e } } throw err };
-  const rcn = async () => { if (!inf || ws.readyState !== 1) { cln(); ws.close(1011); return } if (cnt >= MAX_RECONN) { cln(); ws.close(1011); return } if (con) return; cnt++; let d = Math.min(50 * Math.pow(1.5, cnt - 1), 3000) * (1.5 - scr * 0.5); d = Math.max(50, Math.floor(d)); try { csk(); if (pb > MAX_PENDING * 2) while (pb > MAX_PENDING && pd.length > 5) { const k = pd.shift(); pb -= k.length; pool.free(k) } await new Promise(r => setTimeout(r, d)); con = true; s = await cn(); w = s.writable.getWriter(); r = s.readable.getReader(); con = false; cnt = 0; scr = Math.min(1, scr + 0.15); stl = 0; lact = Date.now(); rdL(); wtL() } catch { con = false; scr = Math.max(0.1, scr - 0.2); if (cnt < MAX_RECONN && ws.readyState === 1) setTimeout(rcn, 500); else { cln(); ws.close(1011) } } };
-  const stT = () => { tm.ka = setInterval(async () => { if (!con && w && Date.now() - lact > KEEPALIVE) try { await w.write(new Uint8Array(0)); lact = Date.now() } catch { rcn() } }, 5000); tm.hc = setInterval(() => { if (!con && st.t > 0 && Date.now() - lact > STALL_TO) { stl++; if (stl >= MAX_STALL) { if (cnt < MAX_RECONN) { stl = 0; rcn() } else { cln(); ws.close(1011) } } } }, 4000) };
+  const rcn = async () => { if (!inf || ws.readyState !== 1) { cln(); ws.close(); return } if (cnt >= MAX_RECONN) { cln(); ws.close(); return } if (con) return; cnt++; let d = Math.min(50 * Math.pow(1.5, cnt - 1), 3000) * (1.5 - scr * 0.5); d = Math.max(50, Math.floor(d)); try { csk(); if (pb > MAX_PENDING * 2) while (pb > MAX_PENDING && pd.length > 5) { const k = pd.shift(); pb -= k.length; pool.free(k) } await new Promise(r => setTimeout(r, d)); con = true; s = await cn(); w = s.writable.getWriter(); r = s.readable.getReader(); con = false; cnt = 0; scr = Math.min(1, scr + 0.15); stl = 0; lact = Date.now(); rdL(); wtL() } catch { con = false; scr = Math.max(0.1, scr - 0.2); if (cnt < MAX_RECONN && ws.readyState === 1) setTimeout(rcn, 500); else { cln(); ws.close() } } };
+  const stT = () => { tm.ka = setInterval(async () => { if (!con && w && Date.now() - lact > KEEPALIVE) try { await w.write(new Uint8Array(0)); lact = Date.now() } catch { rcn() } }, 5000); tm.hc = setInterval(() => { if (!con && st.t > 0 && Date.now() - lact > STALL_TO) { stl++; if (stl >= MAX_STALL) { if (cnt < MAX_RECONN) { stl = 0; rcn() } else { cln(); ws.close() } } } }, 4000) };
   const csk = () => { rd = false; wt = false; try { w?.releaseLock(); r?.releaseLock(); s?.close() } catch { } }; const cln = () => { Object.values(tm).forEach(clearInterval); csk(); while (pd.length) pool.free(pd.shift()); pb = 0; st = { t: 0, c: 0, ts: Date.now() }; md = 'buf'; asz = 0; tp = []; pool.reset() };
-  ws.addEventListener('message', async e => { try { if (fst) { fst = false; const b = new Uint8Array(e.data); if (buildUUID(b, 1).toLowerCase() !== currentUUID.toLowerCase()) throw 0; ws.send(new Uint8Array([0, 0])); const { host, port, payload } = extractAddr(b); inf = { host, port }; con = true; if (payload.length) { const z = pool.alloc(payload.length); z.set(payload); pd.push(z); pb += z.length } stT(); est() } else { lact = Date.now(); if (pb > MAX_PENDING * 2) return; const z = pool.alloc(e.data.byteLength); z.set(new Uint8Array(e.data)); pd.push(z); pb += z.length } } catch { cln(); ws.close(1006) } }); ws.addEventListener('close', cln); ws.addEventListener('error', cln)
+  ws.addEventListener('message', async e => { try { if (fst) { fst = false; const b = new Uint8Array(e.data); if (buildUUID(b, 1).toLowerCase() !== currentUUID.toLowerCase()) throw 0; ws.send(new Uint8Array([0, 0])); const { host, port, payload } = extractAddr(b); inf = { host, port }; con = true; if (payload.length) { const z = pool.alloc(payload.length); z.set(payload); pd.push(z); pb += z.length } stT(); est() } else { lact = Date.now(); if (pb > MAX_PENDING * 2) return; const z = pool.alloc(e.data.byteLength); z.set(new Uint8Array(e.data)); pd.push(z); pb += z.length } } catch { cln(); ws.close() } }); ws.addEventListener('close', cln); ws.addEventListener('error', cln)
 };
 
-// 🟢 保持不变：Login Page
 function loginPage(isError, tgGroup, tgChannel){
     return `
 <!DOCTYPE html>
@@ -372,9 +408,7 @@ function verify(){
 </html>`;
 }
 
-// 🟢 保持不变：Dash Page (Logout逻辑正常，不修改)
 function dashPage(host, uuid, proxyip, subpass, tgtoken, tgid, tgGroup){
-    const s = (tgtoken && tgid) ? '<div class="status-item available">🤖 Telegram 通知: <span style="color:#00b894;font-weight:bold">已开启</span></div>' : '<div class="status-item">🤖 Telegram 通知: <span style="color:#fab1a0">未配置</span></div>';
     const shortUrl = subpass ? `https://${host}/${subpass}` : `https://${host}/`;
     
     return `
@@ -383,108 +417,272 @@ function dashPage(host, uuid, proxyip, subpass, tgtoken, tgid, tgGroup){
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Worker 订阅管理</title>
+<title>Worker 管理面板</title>
 <style>
-:root { --glass: rgba(255, 255, 255, 0.1); --border: rgba(255, 255, 255, 0.2); }
-body { background: linear-gradient(135deg, #2b1055 0%, #7597de 100%); color: white; font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 20px; min-height: 100vh; display: flex; justify-content: center; box-sizing: border-box; }
-.container { max-width: 800px; width: 100%; }
-.card { background: var(--glass); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid var(--border); border-radius: 16px; padding: 25px; margin-bottom: 20px; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3); }
-.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; padding-bottom: 15px; border-bottom: 1px solid var(--border); }
-h1 { margin: 0; font-size: 1.5rem; font-weight: 600; text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3); }
-h3 { margin-top: 0; font-size: 1.1rem; border-bottom: 1px solid var(--border); padding-bottom: 10px; color: #dfe6e9; }
-.btn-group { display: flex; gap: 10px; }
-.btn-small { font-size: .85rem; cursor: pointer; background: rgba(0, 0, 0, 0.3); padding: 5px 12px; border-radius: 6px; text-decoration: none; color: white; transition: .2s; border: 1px solid transparent; }
-.btn-small:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(255, 255, 255, 0.5); }
-.field { margin-bottom: 18px; }
-.label { display: block; font-size: .9rem; color: #dfe6e9; margin-bottom: 8px; font-weight: 500; }
+:root { --dark-bg: #1a1a2e; --card-bg: rgba(22, 33, 62, 0.9); --glass: rgba(255, 255, 255, 0.05); --border: rgba(255, 255, 255, 0.1); --accent: #0f3460; --text: #e94560; --highlight: #4ecca3; }
+body { background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); color: #fff; font-family: 'Segoe UI', system-ui, sans-serif; margin: 0; padding: 20px; min-height: 100vh; display: flex; justify-content: center; box-sizing: border-box; }
+.container { max-width: 900px; width: 100%; display: flex; flex-direction: column; gap: 20px; }
+.card { background: var(--card-bg); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: 16px; padding: 20px; box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3); }
+.header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border); padding-bottom: 15px; margin-bottom: 20px; }
+.header h1 { margin: 0; font-size: 1.4rem; color: #fff; display: flex; align-items: center; gap: 10px; }
+.btn-group { display: flex; gap: 8px; }
+.btn-icon { background: rgba(255,255,255,0.1); border: none; border-radius: 8px; color: #fff; width: 36px; height: 36px; cursor: pointer; transition: .2s; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; }
+.btn-icon:hover { background: var(--highlight); color: #000; }
+.grid-cols { display: grid; grid-template-columns: 1fr; gap: 20px; }
+@media(min-width: 768px) { .grid-cols { grid-template-columns: repeat(2, 1fr); } }
+.holo-container { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 20px; position: relative; }
+.progress-ring__circle { transition: stroke-dashoffset 0.35s; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.holo-text { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); text-align: center; }
+.holo-val { font-size: 2rem; font-weight: bold; color: var(--highlight); }
+.holo-label { font-size: 0.8rem; color: #aaa; }
+.cyber-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.cyber-item { background: rgba(0,0,0,0.3); border: 1px solid var(--border); border-radius: 8px; padding: 12px; display: flex; align-items: center; justify-content: space-between; }
+.cyber-label { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; color: #ddd; }
+.status-dot { width: 8px; height: 8px; border-radius: 50%; background: #555; box-shadow: 0 0 5px #555; transition: .3s; }
+.status-dot.ok { background: #00b894; box-shadow: 0 0 8px #00b894; }
+.status-dot.err { background: #ff7675; box-shadow: 0 0 8px #ff7675; }
+.cyber-val { font-family: monospace; color: var(--highlight); }
+.field { margin-bottom: 15px; }
+.label { display: block; font-size: 0.85rem; color: #bbb; margin-bottom: 6px; }
 .input-group { display: flex; gap: 10px; }
-input, textarea { width: 100%; background: rgba(0, 0, 0, 0.25); border: 1px solid var(--border); color: white; padding: 12px; border-radius: 8px; font-family: monospace; outline: none; transition: .2s; box-sizing: border-box; }
-input:focus, textarea:focus { background: rgba(0, 0, 0, 0.4); border-color: #a29bfe; }
-textarea { min-height: 120px; resize: vertical; line-height: 1.4; }
-button.main-btn { background: linear-gradient(90deg, #6c5ce7, #a29bfe); color: white; border: none; padding: 12px 20px; border-radius: 8px; cursor: pointer; font-weight: 600; width: 100%; margin-top: 5px; transition: .2s; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2); font-size: 1rem; }
-button.main-btn:hover { transform: translateY(-2px); opacity: .95; }
-button.sec-btn { background: rgba(255, 255, 255, 0.15); color: white; border: 1px solid var(--border); padding: 12px; border-radius: 8px; cursor: pointer; white-space: nowrap; transition: .2s; }
-button.sec-btn:hover { background: rgba(255, 255, 255, 0.3); }
-.toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: #00b894; color: white; padding: 10px 24px; border-radius: 30px; opacity: 0; transition: .3s; pointer-events: none; box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3); font-weight: bold; }
+input[type="text"], input[type="password"] { width: 100%; background: rgba(0, 0, 0, 0.3); border: 1px solid var(--border); color: #fff; padding: 10px; border-radius: 6px; outline: none; transition: .2s; }
+input:focus { border-color: var(--highlight); background: rgba(0,0,0,0.5); }
+.btn { background: var(--accent); color: white; border: 1px solid var(--border); padding: 10px 16px; border-radius: 6px; cursor: pointer; transition: .2s; font-size: 0.9rem; }
+.btn:hover { background: #16213e; border-color: var(--highlight); }
+.btn-primary { background: linear-gradient(90deg, #4ecca3, #2c3e50); border: none; font-weight: bold; }
+.btn-danger { background: #e94560; border: none; }
+.modal-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); backdrop-filter: blur(5px); display: none; justify-content: center; align-items: center; z-index: 100; opacity: 0; transition: opacity .3s; }
+.modal-overlay.active { display: flex; opacity: 1; }
+.modal-box { background: #1a1a2e; width: 90%; max-width: 500px; border-radius: 16px; border: 1px solid var(--highlight); box-shadow: 0 0 20px rgba(78, 204, 163, 0.2); padding: 25px; transform: scale(0.9); transition: transform .3s; }
+.modal-overlay.active .modal-box { transform: scale(1); }
+.modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; border-bottom: 1px solid var(--border); padding-bottom: 10px; }
+.tabs { display: flex; gap: 10px; margin-bottom: 20px; background: rgba(0,0,0,0.3); padding: 5px; border-radius: 8px; }
+.tab { flex: 1; text-align: center; padding: 8px; cursor: pointer; border-radius: 6px; color: #888; transition: .2s; }
+.tab.active { background: var(--highlight); color: #000; font-weight: bold; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.modal-actions { display: flex; gap: 10px; margin-top: 20px; justify-content: flex-end; }
+.toast { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); background: var(--highlight); color: #000; padding: 10px 24px; border-radius: 30px; opacity: 0; transition: .3s; pointer-events: none; font-weight: bold; z-index: 200; }
 .toast.show { opacity: 1; bottom: 50px; }
-.desc { font-size: .8rem; color: #b2bec3; margin-top: 6px; }
-.checkbox-wrapper { display: flex; align-items: center; margin-top: 10px; background: rgba(0, 0, 0, 0.2); padding: 8px 12px; border-radius: 6px; width: fit-content; }
-.checkbox-wrapper input { width: auto; margin-right: 8px; cursor: pointer; }
-.checkbox-wrapper label { cursor: pointer; font-size: .9rem; color: #dfe6e9; }
-.status-item { background: rgba(0, 0, 0, 0.2); padding: 8px 12px; border-radius: 6px; font-size: .9rem; margin-top: 10px; display: inline-block; }
+textarea { width: 100%; background: rgba(0,0,0,0.3); border: 1px solid var(--border); color: #ccc; padding: 10px; border-radius: 6px; min-height: 100px; resize: vertical; }
 </style>
 </head>
 <body>
+
 <div class="container">
   <div class="card">
     <div class="header">
-      <h1>⚡ Worker 管理面板</h1>
+      <h1>⚡ Worker 控制台</h1>
       <div class="btn-group">
-        <a href="${tgGroup}" target="_blank" class="btn-small">✈️ 加入群组</a>
-        <span class="btn-small" onclick="logout()">退出登录</span>
+        <button class="btn-icon" onclick="openSettings()" title="设置">⚙️</button>
+        <button class="btn-icon" onclick="window.open('${tgGroup}')" title="群组">✈️</button>
+        <button class="btn-icon" onclick="logout()" title="退出" style="color:#ff6b6b">⏻</button>
       </div>
     </div>
-    <div style="margin-bottom:20px;text-align:center">${s}</div>
-    <div class="field" style="background:rgba(108,92,231,0.2);padding:15px;border-radius:10px;border:1px solid rgba(162,155,254,0.4)">
-      <span class="label" style="color:#a29bfe;font-weight:bold">🚀 快速自适应订阅 (推荐) 通用订阅复制这里</span>
+    <div class="grid-cols">
+      <div style="background: rgba(0,0,0,0.2); border-radius:12px; border:1px dashed var(--border);">
+        <div class="holo-container">
+          <svg class="progress-ring" width="120" height="120">
+            <circle class="progress-ring__circle" stroke="var(--border)" stroke-width="8" fill="transparent" r="52" cx="60" cy="60"/>
+            <circle id="ring-val" class="progress-ring__circle" stroke="var(--highlight)" stroke-width="8" stroke-linecap="round" fill="transparent" r="52" cx="60" cy="60" stroke-dasharray="326.72" stroke-dashoffset="326.72"/>
+          </svg>
+          <div class="holo-text">
+            <div class="holo-val" id="req-count">-</div>
+            <div class="holo-label">今日请求</div>
+          </div>
+        </div>
+        <div style="text-align:center; font-size:0.8rem; color:#888; padding-bottom:10px;">Cloudflare 统计</div>
+      </div>
+      <div class="cyber-grid">
+        <div class="cyber-item">
+          <div class="cyber-label"><span class="status-dot" id="dot-cf"></span>Cloudflare API</div>
+          <div class="cyber-val" id="ping-cf">--ms</div>
+        </div>
+        <div class="cyber-item">
+          <div class="cyber-label"><span class="status-dot" id="dot-google"></span>Google (连通)</div>
+          <div class="cyber-val" id="ping-google">--ms</div>
+        </div>
+        <div class="cyber-item">
+          <div class="cyber-label">🌍 当前 IP</div>
+          <div class="cyber-val" style="font-size:0.8rem">${proxyip}</div>
+        </div>
+        <div class="cyber-item">
+          <button class="btn" style="width:100%; padding:5px;" onclick="refreshNet()">🔄 刷新状态</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="field">
+      <span class="label" style="color:var(--highlight)">🚀 通用订阅链接 (自动识别)</span>
       <div class="input-group">
         <input type="text" id="shortSub" value="${shortUrl}" readonly onclick="this.select()">
-        <button class="sec-btn" onclick="copyId('shortSub')">复制</button>
+        <button class="btn" onclick="copyId('shortSub')">复制</button>
       </div>
-      <div class="desc">直接使用此链接。支持通用订阅客户端(自适应客户端订阅)。<br/>节点将自动抓取上游并替换为Worker加速。</div>
-      <div style="margin-top:10px;font-size:0.9rem;color:#ff4757;font-weight:bold;text-align:center;">【↓下方的可修改内容指向手动订阅链接】</div>
     </div>
-    <div class="field">
-      <span class="label">1. 订阅数据源 (Sub优选订阅器处)</span>
-      <input type="text" id="subBaseUrl" value="https://${host}" placeholder="https://你的sub地址或者是worker域名地址" oninput="updateLink()"><div class="desc">这里可修改成你的sub地址或者是你的worker域名地址。</div>
-    </div>
-    <div class="field">
-      <span class="label">2. ProxyIP 修改处</span>
-      <div class="input-group">
-        <input type="text" id="proxyIp" value="${proxyip}" placeholder="例如: 你的proxyip地址" oninput="updateLink()">
-        <button class="sec-btn" onclick="checkProxy()">🔍 检测</button>
+    
+    <div class="grid-cols" style="margin-top:15px;">
+      <div class="field">
+        <span class="label">订阅域名 (Host)</span>
+        <input type="text" id="subBaseUrl" value="https://${host}" oninput="updateLink()">
       </div>
-      <div class="desc">这里决定了你的proxyip地址，谨慎修改正确的proxyip地址内容。</div>
+      <div class="field">
+        <span class="label">ProxyIP (优选)</span>
+        <div class="input-group">
+          <input type="text" id="proxyIp" value="${proxyip}" oninput="updateLink()">
+          <button class="btn" onclick="checkProxy()">检测</button>
+        </div>
+      </div>
     </div>
-    <div class="field" id="clashSettings" style="display:none;background:rgba(0,0,0,0.15);padding:15px;border-radius:8px;margin-bottom:18px;border:1px dashed #6c5ce7">
-      <span class="label" style="color:#a29bfe">⚙️ Clash 高级配置</span>
-      <div style="margin-bottom:10px">
-        <span class="label" style="font-size:0.85rem">转换后端:</span>
+
+    <div id="clashSettings" style="display:none; background:rgba(0,0,0,0.2); padding:15px; border-radius:8px; margin:15px 0;">
+      <span class="label" style="color:#aaa; border-bottom:1px solid #444; display:block; margin-bottom:10px; padding-bottom:5px;">Clash 高级参数</span>
+      <div class="field">
+        <span class="label">转换后端</span>
         <input type="text" id="converterUrl" value="${DEFAULT_CONVERTER}" oninput="updateLink()">
       </div>
-      <div>
-        <span class="label" style="font-size:0.85rem">远程配置:</span>
+      <div class="field">
+        <span class="label">配置文件 URL</span>
         <input type="text" id="configUrl" value="https://raw.githubusercontent.com/sinspired/sub-store-template/main/1.12.x/sing-box.json" oninput="updateLink()">
       </div>
     </div>
-    <div class="field">
-      <span class="label">3. 手动生成订阅链接 (Legacy)</span>
-      <input type="text" id="resultUrl" readonly onclick="this.select()">
-      <div class="checkbox-wrapper">
-        <input type="checkbox" id="clashMode" onchange="toggleClashMode()">
-        <label for="clashMode">🔄 开启 Clash 转换</label>
+
+    <div class="field" style="margin-top:15px;">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <span class="label">生成结果</span>
+        <div class="checkbox-wrapper">
+          <input type="checkbox" id="clashMode" onchange="toggleClashMode()">
+          <label for="clashMode" style="font-size:0.8rem; color:var(--highlight);">启用 Clash 模式</label>
+        </div>
       </div>
+      <input type="text" id="resultUrl" readonly onclick="this.select()">
     </div>
-    <div class="input-group">
-      <button class="main-btn" onclick="copyId('resultUrl')">📄 复制订阅链接</button>
-      <button class="sec-btn" onclick="window.open(document.getElementById('resultUrl').value)" style="width:120px">🚀 测试</button>
+    
+    <div class="input-group" style="margin-top:15px;">
+      <button class="btn btn-primary" style="flex:1" onclick="copyId('resultUrl')">复制最终链接</button>
+      <button class="btn" onclick="window.open(document.getElementById('resultUrl').value)">测试访问</button>
     </div>
   </div>
+
   <div class="card">
-    <h3>🚀 优选IP预览</h3>
-    <div class="field">
-      <span class="label">内置 IP 列表</span>
-      <textarea id="customIps" readonly style="background:rgba(0,0,0,0.2);border-color:transparent;cursor:default;height:150px">${DEFAULT_CUSTOM_IPS}</textarea>
+    <span class="label">内置优选 IP 列表</span>
+    <textarea readonly>${DEFAULT_CUSTOM_IPS}</textarea>
+  </div>
+</div>
+
+<div class="modal-overlay" id="settingsModal">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h3>🛠️ 高级设置</h3>
+      <button class="btn-icon" onclick="closeSettings()" style="width:24px;height:24px;font-size:1rem;">×</button>
+    </div>
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('tg')">Telegram 通知</div>
+      <div class="tab" onclick="switchTab('cf')">CF 统计配置</div>
+    </div>
+    <div id="tab-tg" class="tab-content active">
+      <div class="field">
+        <span class="label">Bot Token</span>
+        <input type="text" id="modal-tg-token" placeholder="123456:ABC-DEF..." value="${tgtoken}">
+      </div>
+      <div class="field">
+        <span class="label">Chat ID</span>
+        <input type="text" id="modal-tg-id" placeholder="123456789" value="${tgid}">
+      </div>
+      <button class="btn" style="width:100%; margin-top:10px; background:#4b6cb7;" onclick="testTG()">📨 发送测试消息</button>
+    </div>
+    <div id="tab-cf" class="tab-content">
+      <div class="field">
+        <span class="label">CF Account ID</span>
+        <input type="text" id="modal-cf-acc" placeholder="Cloudflare Account ID">
+      </div>
+      <div class="field">
+        <span class="label">CF Email (Login Email)</span>
+        <input type="text" id="modal-cf-email" placeholder="example@gmail.com">
+      </div>
+      <div class="field">
+        <span class="label">Global API Key</span>
+        <input type="password" id="modal-cf-key" placeholder="Global API Key (Not Token)">
+      </div>
+      <button class="btn" style="width:100%; margin-top:10px; background:#f39c12;" onclick="fetchCF()">📊 测试获取统计</button>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" style="background:#555;" onclick="closeSettings()">取消</button>
+      <button class="btn btn-primary" onclick="saveSettings()">💾 保存配置</button>
     </div>
   </div>
 </div>
+
 <div id="toast" class="toast">已复制!</div>
+
 <script>
-function toggleClashMode(){
-  const e=document.getElementById("clashMode").checked;
-  document.getElementById("clashSettings").style.display=e?"block":"none";
-  updateLink();
+let CF_CACHE = { acc: '', email: '', key: '' };
+function init(){ updateLink(); loadLocalSettings(); refreshNet(); if(CF_CACHE.acc && CF_CACHE.key) fetchCF(true); }
+function loadLocalSettings(){
+    const stored = localStorage.getItem('cf_worker_config');
+    if(stored){
+        const data = JSON.parse(stored);
+        CF_CACHE = data;
+        document.getElementById('modal-cf-acc').value = data.acc || '';
+        document.getElementById('modal-cf-email').value = data.email || '';
+        document.getElementById('modal-cf-key').value = data.key || '';
+    }
 }
+function saveSettings(){
+    const acc = document.getElementById('modal-cf-acc').value.trim();
+    const email = document.getElementById('modal-cf-email').value.trim();
+    const key = document.getElementById('modal-cf-key').value.trim();
+    localStorage.setItem('cf_worker_config', JSON.stringify({ acc, email, key }));
+    CF_CACHE = { acc, email, key };
+    showToast("配置已保存 (本地)");
+    closeSettings();
+    setTimeout(()=>fetchCF(true), 500);
+}
+function openSettings(){ document.getElementById('settingsModal').classList.add('active'); }
+function closeSettings(){ document.getElementById('settingsModal').classList.remove('active'); }
+function switchTab(t){
+    document.querySelectorAll('.tab').forEach(e=>e.classList.remove('active'));
+    document.querySelectorAll('.tab-content').forEach(e=>e.classList.remove('active'));
+    event.target.classList.add('active');
+    document.getElementById('tab-'+t).classList.add('active');
+}
+async function testTG(){
+    const t = document.getElementById('modal-tg-token').value.trim();
+    const i = document.getElementById('modal-tg-id').value.trim();
+    if(!t || !i) return alert("请填写 Token 和 Chat ID");
+    try { const r = await fetch('?flag=test_tg&token='+encodeURIComponent(t)+'&id='+encodeURIComponent(i)); const j = await r.json(); if(j.ok) alert("测试成功！请检查 TG"); else alert("测试失败"); } catch(e){ alert("请求错误"); }
+}
+async function fetchCF(silent=false){
+    const acc = document.getElementById('modal-cf-acc').value.trim() || CF_CACHE.acc;
+    const email = document.getElementById('modal-cf-email').value.trim() || CF_CACHE.email;
+    const key = document.getElementById('modal-cf-key').value.trim() || CF_CACHE.key;
+    if(!acc || !key) { if(!silent) alert("请先填写 Cloudflare API 信息"); return; }
+    if(!silent) document.body.style.cursor = 'wait';
+    try {
+        const r = await fetch('?flag=get_cf_stats', { headers: { 'X-CF-Email': email, 'X-CF-Key': key, 'X-CF-Acc': acc } });
+        if(r.ok){
+            const data = await r.json();
+            try { const reqs = data.data.viewer.accounts[0].workersInvocationsAdaptive[0].sum.requests; updateRing(reqs); if(!silent) alert("获取成功！今日请求: " + reqs); } catch(e) { updateRing(0); if(!silent) alert("数据解析失败，可能无数据或权限不足"); }
+        } else { if(!silent) alert("API 请求失败: " + r.status); }
+    } catch(e){ console.error(e); if(!silent) alert("网络错误"); }
+    if(!silent) document.body.style.cursor = 'default';
+}
+function updateRing(val){
+    const max = 100000;
+    const circle = document.getElementById('ring-val');
+    const radius = circle.r.baseVal.value;
+    const circum = radius * 2 * Math.PI;
+    const offset = circum - (val / max) * circum;
+    circle.style.strokeDashoffset = offset;
+    document.getElementById('req-count').innerText = val > 1000 ? (val/1000).toFixed(1)+'k' : val;
+}
+async function refreshNet(){
+    const setStatus = (id, ok, ms) => { const d = document.getElementById('dot-'+id); const v = document.getElementById('ping-'+id); d.className = 'status-dot ' + (ok ? 'ok' : 'err'); v.innerText = ok ? ms + 'ms' : 'Error'; };
+    fetch('?flag=net_test&url=https://www.google.com/favicon.ico').then(r=>r.json()).then(d=>{ setStatus('google', d.ok, d.ms); });
+    fetch('?flag=net_test&url=https://www.cloudflare.com/favicon.ico').then(r=>r.json()).then(d=>{ setStatus('cf', d.ok, d.ms); });
+}
+function toggleClashMode(){ const e=document.getElementById("clashMode").checked; document.getElementById("clashSettings").style.display=e?"block":"none"; updateLink(); }
 function updateLink(){
   let e=document.getElementById("subBaseUrl").value.trim();
   if(e.endsWith("/")) e=e.slice(0,-1);
@@ -501,36 +699,17 @@ function updateLink(){
     const cfg=document.getElementById("configUrl").value.trim();
     let configParam = cfg ? "&config="+encodeURIComponent(cfg) : "";
     document.getElementById("resultUrl").value = c + "/sub?target=clash&url="+encodeURIComponent(o)+configParam+"&emoji=true&list=false&tfo=false&scv=false&fdn=false&sort=false";
-  } else {
-    document.getElementById("resultUrl").value = o;
-  }
+  } else { document.getElementById("resultUrl").value = o; }
 }
-function copyId(e){
-  navigator.clipboard.writeText(document.getElementById(e).value).then(()=>showToast("已复制!"));
-}
+function copyId(e){ navigator.clipboard.writeText(document.getElementById(e).value).then(()=>showToast("已复制!")); }
 function checkProxy(){
   const e=document.getElementById("proxyIp").value.trim();
   fetch("?flag=checkproxy&ip="+encodeURIComponent(e)+"&t="+Date.now(),{keepalive:!0});
-  if(e){
-    navigator.clipboard.writeText(e).then(()=>{
-      alert("ProxyIP 已复制!");
-      window.open("${PROXY_CHECK_URL}","_blank");
-    });
-  } else {
-    window.open("${PROXY_CHECK_URL}","_blank");
-  }
+  if(e){ navigator.clipboard.writeText(e).then(()=>{ alert("ProxyIP 已复制!"); window.open("${PROXY_CHECK_URL}","_blank"); }); } else { window.open("${PROXY_CHECK_URL}","_blank"); }
 }
-function showToast(e){
-  const t=document.getElementById("toast");
-  t.innerText=e;
-  t.classList.add("show");
-  setTimeout(()=>t.classList.remove("show"),2e3);
-}
-function logout(){
-  document.cookie = "auth=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
-  window.location.reload();
-}
-window.onload=()=>{updateLink()};
+function showToast(e){ const t=document.getElementById("toast"); t.innerText=e; t.classList.add("show"); setTimeout(()=>t.classList.remove("show"),2000); }
+function logout(){ document.cookie = "auth=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;"; window.location.reload(); }
+window.onload=init;
 </script>
 </body>
 </html>`;
